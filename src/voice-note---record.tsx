@@ -57,7 +57,80 @@ export default function Command() {
     return parts.filter(Boolean).join("\n");
   }, [isRecording, isStopping, startedAt, tick, log, audioPath]);
 
-  async function onStart() {
+  const transcribeAudioFile = async (openaiApiKey: string) => {
+    // Transcribe with OpenAI
+    await showToast({ style: Toast.Style.Animated, title: "Transcribing audio…" });
+    const transcriptionText = await transcribeAudio(audioPath as FilePath, openaiApiKey, {
+      model: "gpt-4o-mini-transcribe", // or "whisper-1"
+      language: "en",
+      timeoutMs: 90000,
+    });
+
+    // Delete audio file after transcription
+    try {
+      if (audioPath) {
+        await unlink(audioPath);
+        setLog((l) => [...l, `Deleted audio file: ${audioPath}`]);
+        setAudioPath(null);
+      }
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setLog((l) => [...l, `Failed to delete audio file: ${msg}`]);
+    }
+
+    if (transcriptionText) {
+      await showToast({ style: Toast.Style.Success, title: "Transcription complete", message: transcriptionText });
+      setLog((l) => [...l, "Transcription:", transcriptionText]);
+
+      return transcriptionText;
+    } else {
+      await showToast({ style: Toast.Style.Failure, title: "No transcription text received" });
+      return null;
+    }
+  };
+
+  const cleanTranscribedText = async (transcriptionText: string, openaiApiKey: string) => {
+    await showToast({ style: Toast.Style.Animated, title: "Cleaning transcription…" });
+    const cleanedMarkdown = await cleanTranscript({
+      apiKey: openaiApiKey,
+      text: transcriptionText,
+      model: "gpt-4.1-mini",
+      temperature: 0.2,
+    });
+
+    if (cleanedMarkdown) {
+      await showToast({ style: Toast.Style.Success, title: "Cleaning complete", message: cleanedMarkdown });
+      setLog((l) => [...l, "Cleaned Transcript:", cleanedMarkdown]);
+      return cleanedMarkdown;
+    } else {
+      await showToast({ style: Toast.Style.Failure, title: "No cleaned text received" });
+      return null;
+    }
+  };
+
+  const createNotionPage = async (markdown: string, notionToken: string, notionDatabaseId: string) => {
+    await showToast({ style: Toast.Style.Animated, title: "Creating Notion page…" });
+    const result = await createNotionPageFromMarkdown({
+      notionToken,
+      databaseId: notionDatabaseId,
+      markdown: markdown, // from your cleanup step
+      explicitTitle: undefined, // or pass a title string if you have one
+    });
+
+    if (result?.pageId) {
+      await showToast({
+        style: Toast.Style.Success,
+        title: "Notion page created",
+        message: result.title,
+      });
+      setLog((l) => [...l, `Notion page created: ${result.title} (${result.pageId})`, result.url || ""]);
+    } else {
+      await showToast({ style: Toast.Style.Failure, title: "Failed to create Notion page" });
+      setLog((l) => [...l, "Failed to create Notion page."]);
+    }
+  };
+
+  const onStart = async () => {
     if (isRecording || isStopping) return;
     try {
       const { child, wavPath } = startRecording({ ffmpegPath, device: micDeviceIndex });
@@ -80,9 +153,9 @@ export default function Command() {
       setLog((l) => [...l, `Failed to start ffmpeg: ${e?.message || e}`]);
       await showToast({ style: Toast.Style.Failure, title: "Failed to start recording" });
     }
-  }
+  };
 
-  async function onStop() {
+  const onStop = async () => {
     const child = procRef.current as RecordingProcess | null;
     if (!isRecording || !child) return;
 
@@ -113,50 +186,13 @@ export default function Command() {
       return;
     }
 
-    // Transcribe with OpenAI
-    await showToast({ style: Toast.Style.Animated, title: "Transcribing audio…" });
-    const transcriptionText = await transcribeAudio(audioPath as FilePath, openaiApiKey, {
-      model: "gpt-4o-mini-transcribe", // or "whisper-1"
-      language: "en",
-      timeoutMs: 90000,
-    });
-
-    // Delete audio file after transcription
-    try {
-      if (audioPath) {
-        await unlink(audioPath);
-        setLog((l) => [...l, `Deleted audio file: ${audioPath}`]);
-        setAudioPath(null);
-      }
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      setLog((l) => [...l, `Failed to delete audio file: ${msg}`]);
-    }
-
-    if (transcriptionText) {
-      await showToast({ style: Toast.Style.Success, title: "Transcription complete", message: transcriptionText });
-      setLog((l) => [...l, "Transcription:", transcriptionText]);
-    } else {
-      await showToast({ style: Toast.Style.Failure, title: "No transcription text received" });
-      return;
-    }
+    // Transcribe the audio
+    const transcriptionText = await transcribeAudioFile(openaiApiKey);
+    if (!transcriptionText) return;
 
     // Clean transcription
-    await showToast({ style: Toast.Style.Animated, title: "Cleaning transcription…" });
-    const cleanedMarkdown = await cleanTranscript({
-      apiKey: openaiApiKey,
-      text: transcriptionText,
-      model: "gpt-4.1-mini", // or expose as preference
-      temperature: 0.2,
-    });
-
-    if (cleanedMarkdown) {
-      await showToast({ style: Toast.Style.Success, title: "Cleaning complete", message: cleanedMarkdown });
-      setLog((l) => [...l, "Cleaned Transcript:", cleanedMarkdown]);
-    } else {
-      await showToast({ style: Toast.Style.Failure, title: "No cleaned text received" });
-      return;
-    }
+    const cleanedMarkdown = await cleanTranscribedText(transcriptionText, openaiApiKey);
+    if (!cleanedMarkdown) return;
 
     if (!notionToken?.trim() || !notionDatabaseId?.trim()) {
       await showToast({ style: Toast.Style.Failure, title: "No Notion token or database ID configured" });
@@ -165,28 +201,10 @@ export default function Command() {
     }
 
     // Create the Notion page
-    await showToast({ style: Toast.Style.Animated, title: "Creating Notion page…" });
-    const result = await createNotionPageFromMarkdown({
-      notionToken,
-      databaseId: notionDatabaseId,
-      markdown: cleanedMarkdown, // from your cleanup step
-      explicitTitle: undefined, // or pass a title string if you have one
-    });
+    await createNotionPage(cleanedMarkdown, notionToken, notionDatabaseId);
+  };
 
-    if (result?.pageId) {
-      await showToast({
-        style: Toast.Style.Success,
-        title: "Notion page created",
-        message: result.title,
-      });
-      setLog((l) => [...l, `Notion page created: ${result.title} (${result.pageId})`, result.url || ""]);
-    } else {
-      await showToast({ style: Toast.Style.Failure, title: "Failed to create Notion page" });
-      setLog((l) => [...l, "Failed to create Notion page."]);
-    }
-  }
-
-  async function listDevices() {
+  const listDevices = async () => {
     const args = ["-f", "avfoundation", "-list_devices", "true", "-i", ""];
     setLog((l) => [...l, `$ ${ffmpegPath} ${args.join(" ")}`]);
     const { spawn } = await import("node:child_process");
@@ -194,7 +212,7 @@ export default function Command() {
     p.stdout.on("data", (d) => setLog((l) => [...l, d.toString().trim()]));
     p.stderr.on("data", (d) => setLog((l) => [...l, d.toString().trim()]));
     p.on("close", () => showToast({ style: Toast.Style.Success, title: "Listed devices (see Log)" }));
-  }
+  };
 
   return (
     <Detail
