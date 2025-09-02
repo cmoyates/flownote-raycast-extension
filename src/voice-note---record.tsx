@@ -1,6 +1,7 @@
 import { Action, ActionPanel, Detail, Icon, Toast, showToast } from "@raycast/api";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { existsSync, statSync } from "node:fs";
+import { unlink } from "node:fs/promises";
 import { usePrefs } from "./lib/prefs";
 import { startRecording, stopRecording } from "./lib/recording/ffmpeg";
 import { FilePath, RecordingProcess } from "./lib/types";
@@ -119,6 +120,18 @@ export default function Command() {
       language: "en",
       timeoutMs: 90000,
     });
+
+    // Delete audio file after transcription
+    try {
+      if (audioPath) {
+        await unlink(audioPath);
+        setLog((l) => [...l, `Deleted audio file: ${audioPath}`]);
+        setAudioPath(null);
+      }
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setLog((l) => [...l, `Failed to delete audio file: ${msg}`]);
+    }
 
     if (transcriptionText) {
       await showToast({ style: Toast.Style.Success, title: "Transcription complete", message: transcriptionText });
